@@ -8,7 +8,6 @@ import {
   DEFAULT_GEMINI_MODEL,
   DEFAULT_GEMINI_FLASH_MODEL,
 } from '../config/models.js';
-import * as readline from 'readline';
 
 /**
  * Checks if the default "pro" model is rate-limited and returns a fallback "flash"
@@ -41,7 +40,7 @@ export async function getEffectiveModel(
   });
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 2000); // 2000ms timeout for the request
+  const timeoutId = setTimeout(() => controller.abort(), 500); // 500ms timeout for the request
 
   try {
     const response = await fetch(endpoint, {
@@ -54,36 +53,18 @@ export async function getEffectiveModel(
     clearTimeout(timeoutId);
 
     if (response.status === 429) {
-      const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-      });
-      return new Promise((resolve) => {
-        rl.question(
-          `[INFO] Your configured model (${modelToTest}) is responding slowly. Would you like to switch to ${fallbackModel} for this session? (y/N) `,
-          (answer) => {
-            rl.close();
-            if (answer.toLowerCase() === 'y') {
-              console.log(
-                `[INFO] Switched to ${fallbackModel} for this session.`,
-              );
-              resolve(fallbackModel);
-            } else {
-              console.log(
-                `[INFO] Continuing with ${modelToTest}. This may be slow.`,
-              );
-              resolve(currentConfiguredModel);
-            }
-          },
-        );
-      });
+      // The actual switch is handled by the retry logic with flashFallbackHandler.
+      // This function now only informs that a fallback *might* be needed.
+      // It doesn't perform the switch itself anymore.
+      // The console.log has been removed to avoid duplicate messages if the
+      // flashFallbackHandler also logs a message.
+      return fallbackModel; // Indicate that fallback is suggested
     }
     // For any other case (success, other error codes), we stick to the original model.
     return currentConfiguredModel;
   } catch (_error) {
     clearTimeout(timeoutId);
     // On timeout or any other fetch error, stick to the original model.
-    // In a future iteration, we might want to ask the user here as well.
     return currentConfiguredModel;
   }
 }

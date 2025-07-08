@@ -239,44 +239,60 @@ describe('retryWithBackoff', () => {
   });
 
   describe('Flash model fallback for OAuth users', () => {
-    it('should trigger fallback for OAuth personal users after persistent 429 errors', async () => {
-      const fallbackCallback = vi.fn().mockResolvedValue('gemini-2.5-flash');
+    // Mock global config and its methods
+    const mockGetFlashFallbackHandler = vi.fn();
+    const mockGlobalConfig = {
+      getFlashFallbackHandler: mockGetFlashFallbackHandler,
+    };
+
+    beforeEach(() => {
+      // Assign the mock to the global object before each test
+      (globalThis as any).config = mockGlobalConfig;
+      mockGetFlashFallbackHandler.mockClear(); // Clear mock history
+    });
+
+    afterEach(() => {
+      // Clean up the global mock after each test
+      delete (globalThis as any).config;
+    });
+
+    it('should trigger fallback handler for OAuth personal users after persistent 429 errors', async () => {
+      const flashFallbackHandler = vi.fn().mockResolvedValue(true); // Simulate user accepts fallback
+      mockGetFlashFallbackHandler.mockReturnValue(flashFallbackHandler);
 
       let fallbackOccurred = false;
       const mockFn = vi.fn().mockImplementation(async () => {
-        if (!fallbackOccurred) {
-          const error: HttpError = new Error('Rate limit exceeded');
-          error.status = 429;
-          throw error;
+        // This condition simulates the model being updated by the handler
+        if (flashFallbackHandler.mock.calls.length > 0 && fallbackOccurred) {
+          return 'success';
         }
-        return 'success';
+        const error: HttpError = new Error('Rate limit exceeded');
+        error.status = 429;
+        throw error;
       });
 
       const promise = retryWithBackoff(mockFn, {
-        maxAttempts: 3,
+        maxAttempts: 3, // Allows for 2 429s then a successful attempt
         initialDelayMs: 100,
-        onPersistent429: async (authType?: string) => {
-          fallbackOccurred = true;
-          return await fallbackCallback(authType);
-        },
         authType: 'oauth-personal',
       });
 
-      // Advance all timers to complete retries
+      // Monitor when the fallback handler is expected to be called
+      flashFallbackHandler.mockImplementation(async () => {
+        fallbackOccurred = true;
+        return true; // User accepts fallback
+      });
+
       await vi.runAllTimersAsync();
-
-      // Should succeed after fallback
       await expect(promise).resolves.toBe('success');
-
-      // Verify callback was called with correct auth type
-      expect(fallbackCallback).toHaveBeenCalledWith('oauth-personal');
-
-      // Should retry again after fallback
-      expect(mockFn).toHaveBeenCalledTimes(3); // 2 initial attempts + 1 after fallback
+      expect(flashFallbackHandler).toHaveBeenCalledWith('oauth-personal');
+      // mockFn is called twice before fallback, then once after.
+      expect(mockFn).toHaveBeenCalledTimes(3);
     });
 
-    it('should NOT trigger fallback for API key users', async () => {
-      const fallbackCallback = vi.fn();
+    it('should NOT trigger fallback handler for API key users', async () => {
+      const flashFallbackHandler = vi.fn();
+      mockGetFlashFallbackHandler.mockReturnValue(flashFallbackHandler);
 
       const mockFn = vi.fn(async () => {
         const error: HttpError = new Error('Rate limit exceeded');
@@ -287,54 +303,21 @@ describe('retryWithBackoff', () => {
       const promise = retryWithBackoff(mockFn, {
         maxAttempts: 3,
         initialDelayMs: 100,
-        onPersistent429: fallbackCallback,
-        authType: 'gemini-api-key',
+        authType: 'gemini-api-key', // Non-OAuth type
       });
 
-      // Handle the promise properly to avoid unhandled rejections
       const resultPromise = promise.catch((error) => error);
       await vi.runAllTimersAsync();
       const result = await resultPromise;
 
-      // Should fail after all retries without fallback
       expect(result).toBeInstanceOf(Error);
       expect(result.message).toBe('Rate limit exceeded');
-
-      // Callback should not be called for API key users
-      expect(fallbackCallback).not.toHaveBeenCalled();
+      expect(flashFallbackHandler).not.toHaveBeenCalled();
     });
 
-    it('should reset attempt counter and continue after successful fallback', async () => {
-      let fallbackCalled = false;
-      const fallbackCallback = vi.fn().mockImplementation(async () => {
-        fallbackCalled = true;
-        return 'gemini-2.5-flash';
-      });
-
-      const mockFn = vi.fn().mockImplementation(async () => {
-        if (!fallbackCalled) {
-          const error: HttpError = new Error('Rate limit exceeded');
-          error.status = 429;
-          throw error;
-        }
-        return 'success';
-      });
-
-      const promise = retryWithBackoff(mockFn, {
-        maxAttempts: 3,
-        initialDelayMs: 100,
-        onPersistent429: fallbackCallback,
-        authType: 'oauth-personal',
-      });
-
-      await vi.runAllTimersAsync();
-
-      await expect(promise).resolves.toBe('success');
-      expect(fallbackCallback).toHaveBeenCalledOnce();
-    });
-
-    it('should continue with original error if fallback is rejected', async () => {
-      const fallbackCallback = vi.fn().mockResolvedValue(null); // User rejected fallback
+    it('should continue with original error if fallback handler returns false (user rejects)', async () => {
+      const flashFallbackHandler = vi.fn().mockResolvedValue(false); // Simulate user rejects fallback
+      mockGetFlashFallbackHandler.mockReturnValue(flashFallbackHandler);
 
       const mockFn = vi.fn(async () => {
         const error: HttpError = new Error('Rate limit exceeded');
@@ -343,62 +326,66 @@ describe('retryWithBackoff', () => {
       });
 
       const promise = retryWithBackoff(mockFn, {
-        maxAttempts: 3,
+        maxAttempts: 3, // Enough attempts to trigger fallback logic
         initialDelayMs: 100,
-        onPersistent429: fallbackCallback,
         authType: 'oauth-personal',
       });
 
-      // Handle the promise properly to avoid unhandled rejections
       const resultPromise = promise.catch((error) => error);
       await vi.runAllTimersAsync();
       const result = await resultPromise;
 
-      // Should fail with original error when fallback is rejected
       expect(result).toBeInstanceOf(Error);
       expect(result.message).toBe('Rate limit exceeded');
-      expect(fallbackCallback).toHaveBeenCalledWith('oauth-personal');
+      expect(flashFallbackHandler).toHaveBeenCalledWith('oauth-personal');
+      // mockFn is called 3 times because fallback was rejected, and retries continued up to maxAttempts.
+      expect(mockFn).toHaveBeenCalledTimes(3);
     });
 
-    it('should handle mixed error types (only count consecutive 429s)', async () => {
-      const fallbackCallback = vi.fn().mockResolvedValue('gemini-2.5-flash');
+    it('should handle mixed error types (only count consecutive 429s for fallback)', async () => {
+      const flashFallbackHandler = vi.fn().mockResolvedValue(true); // Simulate user accepts fallback
+      mockGetFlashFallbackHandler.mockReturnValue(flashFallbackHandler);
+
       let attempts = 0;
-      let fallbackOccurred = false;
+      let fallbackLogicTriggered = false;
 
       const mockFn = vi.fn().mockImplementation(async () => {
         attempts++;
-        if (fallbackOccurred) {
+        // Simulate success only after fallback logic has been triggered
+        if (fallbackLogicTriggered) {
           return 'success';
         }
         if (attempts === 1) {
-          // First attempt: 500 error (resets consecutive count)
           const error: HttpError = new Error('Server error');
-          error.status = 500;
+          error.status = 500; // Non-429 error
           throw error;
         } else {
-          // Remaining attempts: 429 errors
+          // Subsequent attempts are 429
           const error: HttpError = new Error('Rate limit exceeded');
           error.status = 429;
           throw error;
         }
       });
 
+      // Monitor when the fallback handler is called
+      flashFallbackHandler.mockImplementation(async () => {
+        fallbackLogicTriggered = true;
+        return true; // User accepts fallback
+      });
+
       const promise = retryWithBackoff(mockFn, {
-        maxAttempts: 5,
+        maxAttempts: 5, // Ample attempts
         initialDelayMs: 100,
-        onPersistent429: async (authType?: string) => {
-          fallbackOccurred = true;
-          return await fallbackCallback(authType);
-        },
         authType: 'oauth-personal',
       });
 
       await vi.runAllTimersAsync();
-
       await expect(promise).resolves.toBe('success');
 
-      // Should trigger fallback after 2 consecutive 429s (attempts 2-3)
-      expect(fallbackCallback).toHaveBeenCalledWith('oauth-personal');
+      // Fallback should be called after the first 500 error and two subsequent 429 errors
+      expect(flashFallbackHandler).toHaveBeenCalledWith('oauth-personal');
+      // Total calls: 1 (500) + 2 (429s for fallback) + 1 (success after fallback) = 4
+      expect(mockFn).toHaveBeenCalledTimes(4);
     });
   });
 });

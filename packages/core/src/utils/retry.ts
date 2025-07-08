@@ -11,11 +11,10 @@ export interface RetryOptions {
   initialDelayMs: number;
   maxDelayMs: number;
   shouldRetry: (error: Error) => boolean;
-  onPersistent429?: (authType?: string) => Promise<string | null>;
   authType?: string;
 }
 
-const DEFAULT_RETRY_OPTIONS: RetryOptions = {
+const DEFAULT_RETRY_OPTIONS: Omit<RetryOptions, 'onPersistent429'> = {
   maxAttempts: 5,
   initialDelayMs: 5000,
   maxDelayMs: 30000, // 30 seconds
@@ -79,6 +78,10 @@ export async function retryWithBackoff<T>(
   let currentDelay = initialDelayMs;
   let consecutive429Count = 0;
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const config = (globalThis as any).config; // Get global config
+  const flashFallbackHandler = config?.getFlashFallbackHandler();
+
   while (attempt < maxAttempts) {
     attempt++;
     try {
@@ -96,13 +99,14 @@ export async function retryWithBackoff<T>(
       // If we have persistent 429s and a fallback callback for OAuth
       if (
         consecutive429Count >= 2 &&
-        onPersistent429 &&
+        flashFallbackHandler && // Use the handler from config
         authType === AuthType.LOGIN_WITH_GOOGLE
       ) {
         try {
-          const fallbackModel = await onPersistent429(authType);
-          if (fallbackModel) {
-            // Reset attempt counter and try with new model
+          // The handler should return true if fallback occurred, false otherwise
+          const fallbackHappened = await flashFallbackHandler(authType);
+          if (fallbackHappened) {
+            // Reset attempt counter and try with new model (assuming handler updated it)
             attempt = 0;
             consecutive429Count = 0;
             currentDelay = initialDelayMs;
@@ -111,7 +115,7 @@ export async function retryWithBackoff<T>(
           }
         } catch (fallbackError) {
           // If fallback fails, continue with original error
-          console.warn('Fallback to Flash model failed:', fallbackError);
+          console.warn('Flash fallback handler failed:', fallbackError);
         }
       }
 
